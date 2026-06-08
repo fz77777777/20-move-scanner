@@ -6,47 +6,62 @@ from datetime import datetime, timedelta
 # Page Configuration
 st.set_page_config(page_title="Advanced Catalyst & Consolidation Scanner", layout="wide")
 st.title("📊 Advanced Stock Scanner: Circuit Breakout & Consolidation")
-st.write("Scan 2500+ stocks for historical sharp moves, volume expansion, and recent tight consolidation.")
+st.write("Scan market for historical sharp moves, volume expansion, and recent tight consolidation.")
 
 # --- SIDEBAR FILTERS ---
 st.sidebar.header("🔍 Filter Parameters")
 
-# 1. Percentage Move Filter
+# 1. New Feature: Lookback History Filter
+lookback_days = st.sidebar.selectbox(
+    "Select Search Window (How many days ago?)",
+    options=[30, 45, 60, 90],
+    index=2,
+    help="Filter stocks that hit circuits within these past days."
+)
+
+# 2. Percentage Move Filter
 min_move = st.sidebar.slider(
     "Select Minimum Circuit/Sharp Move (%)", 
-    min_value=10, max_value=20, value=20, step=1
+    min_value=10, max_value=20, value=15, step=1
 )
 
-# 2. Volume Filter
+# 3. Volume Filter
 volume_multiplier = st.sidebar.slider(
-    "Volume Spurt Filter (X times of 20-day Avg Volume on breakout day)", 
-    min_value=1.5, max_value=10.0, value=3.0, step=0.5
+    "Volume Spurt Filter (X times of 20-day Avg Volume)", 
+    min_value=1.0, max_value=10.0, value=2.0, step=0.5
 )
 
-# 3. Consolidation Days
+# 4. Consolidation Days & Max Allowed Consolidation Range
 consolidation_days = st.sidebar.number_input(
     "Consolidation Period (Recent Days)", 
     min_value=3, max_value=20, value=7
 )
 
-# Dummy Ticker List for Demo (You can replace this with 2500+ NSE/BSE tickers from a CSV)
+max_consolidation_allowed = st.sidebar.slider(
+    "Max Allowed Consolidation Band (%)",
+    min_value=5.0, max_value=15.0, value=10.0, step=0.5,
+    help="Increase this if no stocks are found. It allows wider consolidation ranges."
+)
+
+# Broad Ticker Pool for Indian Market (You can add more tickers here)
 @st.cache_data
 def load_tickers():
     return [
         "HGINFRA.NS", "PARAS.NS", "CGPOWER.NS", "RTNINDIA.NS", "COCHINSHIP.NS", 
         "GRSE.NS", "RAILTEL.NS", "DIVISLAB.NS", "HINDALCO.NS", "NATIONALUM.NS", 
-        "BEL.NS", "RAMCOSYS.NS", "RITES.NS", "NRBBEARING.NS", "GODIGIT.NS"
+        "BEL.NS", "RAMCOSYS.NS", "RITES.NS", "NRBBEARING.NS", "GODIGIT.NS",
+        "TATASTEEL.NS", "RELIANCE.NS", "IRFC.NS", "RVNL.NS", "BHEL.NS"
     ]
 
 tickers = load_tickers()
 
 # --- SCANNING LOGIC ---
-def scan_stocks(ticker_list, min_move, vol_mult, cons_days):
+def scan_stocks(ticker_list, min_move, vol_mult, cons_days, lookback, max_cons):
     scanned_data = []
     
-    # 2 months historical data timeframe
     end_date = datetime.today()
-    start_date = end_date - timedelta(days=60)
+    # Dynamic Start Date based on user input (30, 45, 60, 90 days)
+    start_date = end_date - timedelta(days=lookback + 25) # Extra 25 days added for 20-day moving average buffer
     
     progress_bar = st.progress(0)
     total_tickers = len(ticker_list)
@@ -55,39 +70,39 @@ def scan_stocks(ticker_list, min_move, vol_mult, cons_days):
         progress_bar.progress((idx + 1) / total_tickers)
         
         try:
-            # Fetch data
             stock = yf.Ticker(ticker)
-            df = stock.history(start=start_date, end=end_date)
+            # Fetch slightly extra data to properly calculate rolling average
+            df = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
             
-            if len(df) < 20:
+            if len(df) < 25:
                 continue
                 
-            # Calculate daily returns and 20-day Average Volume
+            # Calculations
             df['Daily_Return'] = df['Close'].pct_change() * 100
             df['Avg_Vol_20'] = df['Volume'].rolling(window=20).mean()
             
-            # Find the day when stock hit the required % move (Circuit Day)
-            circuit_days = df[df['Daily_Return'] >= min_move]
+            # Slice data strictly to the user requested lookback window for circuit searching
+            search_df = df.tail(lookback)
+            circuit_days = search_df[search_df['Daily_Return'] >= min_move]
             
             if not circuit_days.empty:
-                # Get the most recent circuit day within 2 months
                 last_circuit_row = circuit_days.iloc[-1]
                 circuit_date = circuit_days.index[-1]
                 
-                # Check Volume Condition on Circuit Day
+                # Volume verification
                 if last_circuit_row['Volume'] >= (last_circuit_row['Avg_Vol_20'] * vol_mult):
                     
-                    # Check Consolidation Condition (Recent 'cons_days' price action should be tight)
+                    # Consolidation Check on recent days
                     recent_df = df.tail(cons_days)
                     if len(recent_df) >= cons_days:
                         max_price = recent_df['High'].max()
                         min_price = recent_df['Low'].min()
                         
-                        # Tight consolidation check (Range should be within 6.5% volatility)
                         consolidation_range = ((max_price - min_price) / min_price) * 100
                         
-                        if consolidation_range <= 6.5: 
-                            # Fetch Catalyst News if available
+                        # Dynamic consolidation range check
+                        if consolidation_range <= max_cons: 
+                            # Fetch News
                             news_headline = "N.A."
                             try:
                                 news_list = stock.news
@@ -96,16 +111,15 @@ def scan_stocks(ticker_list, min_move, vol_mult, cons_days):
                             except Exception:
                                 news_headline = "N.A."
                                 
-                            # Calculate volume in millions for clean display
                             breakout_volume_mn = last_circuit_row['Volume'] / 1_000_000
                                 
                             scanned_data.append({
                                 "Stock Ticker": ticker,
                                 "Current Price": round(df['Close'].iloc[-1], 2),
-                                f"{min_move}% Circuit Date": circuit_date.strftime('%Y-%m-%d'),
-                                "Move % on that Day": round(last_circuit_row['Daily_Return'], 2),
+                                f"{min_move}%+ Breakout Date": circuit_date.strftime('%Y-%m-%d'),
+                                "Move % on Breakout Day": round(last_circuit_row['Daily_Return'], 2),
                                 "Breakout Day Volume (Mn)": f"{round(breakout_volume_mn, 2)} M",
-                                "Consolidation Range (%)": f"{round(consolidation_range, 2)}%",
+                                "Recent Consolidation Range": f"{round(consolidation_range, 2)}%",
                                 "Catalyst News / Latest Trigger": news_headline
                             })
                             
@@ -115,25 +129,21 @@ def scan_stocks(ticker_list, min_move, vol_mult, cons_days):
     return pd.DataFrame(scanned_data)
 
 # --- RUN SCANNER ---
-if st.button("🚀 Run 2500+ Market Scan"):
-    with st.spinner("Scanning historical charts for patterns, volumes, and news triggers..."):
-        results_df = scan_stocks(tickers, min_move, volume_multiplier, consolidation_days)
+if st.button("🚀 Run Market Scan"):
+    with st.spinner("Processing historical delivery data and matching consolidation setups..."):
+        results_df = scan_stocks(tickers, min_move, volume_multiplier, consolidation_days, lookback_days, max_consolidation_allowed)
         
         if not results_df.empty:
-            st.success(f"Found {len(results_df)} stocks matching your criteria!")
-            
-            # Display interactive Dataframe
+            st.success(f"Found {len(results_df)} stocks matching your exact framework!")
             st.dataframe(
                 results_df, 
                 use_container_width=True,
                 column_config={
-                    "Breakout Day Volume (Mn)": st.column_config.TextColumn("Breakout Vol (Mn)", help="Volume traded on the day of sharp upmove."),
                     "Catalyst News / Latest Trigger": st.column_config.TextColumn(width="large")
                 }
             )
             
-            # Download Button for Excel/CSV export
             csv = results_df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Export List to CSV", csv, "circuit_consolidation_scan.csv", "text/csv")
+            st.download_button("📥 Export List to CSV", csv, "active_consolidation_scan.csv", "text/csv")
         else:
-            st.warning("No stocks found with the current filter criteria. Try tweaking the filters.")
+            st.error("No stocks found! Try these modifications: 1) Increase 'Lookback History' to 60/90 days, 2) Decrease 'Minimum Move' to 12-14%, 3) Increase 'Max Allowed Consolidation Band' to 12%.")
