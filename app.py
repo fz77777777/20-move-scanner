@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 
 # Page Configuration
 st.set_page_config(page_title="Advanced Catalyst & Consolidation Scanner", layout="wide")
-st.title("📊 Advanced Stock Scanner: Circuit Breakout & Consolidation")
-st.write("Scan market for historical sharp moves, volume expansion, and recent tight consolidation.")
+st.title("📊 Advanced Stock Scanner: Circuit Breakout & Consolidation (Full NSE)")
+st.write("Scan entire 2500+ NSE market for historical sharp moves, volume expansion, and tight consolidation.")
 
 # --- SIDEBAR FILTERS ---
 st.sidebar.header("🔍 Filter Parameters")
@@ -29,120 +29,56 @@ volume_multiplier = st.sidebar.slider(
 
 consolidation_days = st.sidebar.slider(
     "Consolidation Period (Recent Days)", 
-    min_value=3, max_value=15, value=5, step=1
+    min_value=3, max_value=20, value=5, step=1
 )
 
 max_consolidation_allowed = st.sidebar.slider(
     "Max Allowed Consolidation Band (%)",
-    min_value=5.0, max_value=20.0, value=12.0, step=0.5
+    min_value=5.0, max_value=25.0, value=12.0, step=0.5
 )
 
-# Broad Ticker Pool (NSE Stocks)
+# --- DYNAMIC 2500+ TICKER LOAD FROM PUBLIC REPOSITORY ---
 @st.cache_data
-def load_tickers():
-    return [
-        "HGINFRA.NS", "PARAS.NS", "CGPOWER.NS", "RTNINDIA.NS", "COCHINSHIP.NS", 
-        "GRSE.NS", "RAILTEL.NS", "DIVISLAB.NS", "HINDALCO.NS", "NATIONALUM.NS", 
-        "BEL.NS", "RAMCOSYS.NS", "RITES.NS", "NRBBEARING.NS", "GODIGIT.NS",
-        "TATASTEEL.NS", "RELIANCE.NS", "IRFC.NS", "RVNL.NS", "BHEL.NS",
-        "AWFIS.NS", "EXICOM.NS", "MAHSEAMLES.NS", "INFY.NS", "TATAMOTORS.NS"
-    ]
+def load_all_nse_tickers():
+    try:
+        # Fetching latest updated complete stock list of NSE dynamically
+        url = "https://raw.githubusercontent.com/itsjustfaiz/NSE-Stocks-Ticker/main/nse_all_stocks.csv"
+        # Fallback public raw asset containing all active NSE equities
+        fallback_url = "https://raw.githubusercontent.com/shangb/NSE-equity-list/master/equity.csv"
+        
+        try:
+            df_nse = pd.read_csv(url)
+            ticker_col = [col for col in df_nse.columns if 'SYMBOL' in col.upper() or 'TICKER' in col.upper()][0]
+            tickers = df_nse[ticker_col].dropna().tolist()
+        except Exception:
+            df_nse = pd.read_csv(fallback_url)
+            tickers = df_nse['SYMBOL'].dropna().tolist()
+            
+        # Standardizing for yfinance data extraction format (adding .NS suffix)
+        nse_tickers = [str(symbol).strip() + ".NS" for symbol in tickers if str(symbol).strip().isalnum()]
+        return sorted(list(set(nse_tickers)))
+    except Exception as e:
+        # Ultimate fallback array if repository link fails temporarily
+        return ["HGINFRA.NS", "PARAS.NS", "CGPOWER.NS", "RTNINDIA.NS", "COCHINSHIP.NS", "GRSE.NS", "RAILTEL.NS", "BEL.NS"]
 
-tickers = load_tickers()
+with st.spinner("Loading 2500+ NSE Tickers database..."):
+    tickers = load_all_nse_tickers()
+st.sidebar.success(f"Loaded Total Active Stocks: {len(tickers)}")
 
 # --- SCANNING LOGIC ---
 def scan_stocks(ticker_list, min_move, vol_mult, cons_days, lookback, max_cons):
     scanned_data = []
     
     end_date = datetime.today()
-    # Adding a massive 40 days buffer to ensure 20-day moving averages never return NaN
     start_date = end_date - timedelta(days=lookback + 40) 
     
+    # UI Elements for progress tracking
     progress_bar = st.progress(0)
+    status_text = st.empty()
     total_tickers = len(ticker_list)
     
     for idx, ticker in enumerate(ticker_list):
+        # Update progress and status on screen
         progress_bar.progress((idx + 1) / total_tickers)
-        
-        try:
-            stock = yf.Ticker(ticker)
-            df = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
-            
-            if len(df) < 30:
-                continue
-                
-            # Calculations
-            df['Daily_Return'] = df['Close'].pct_change() * 100
-            df['Avg_Vol_20'] = df['Volume'].rolling(window=20).mean()
-            
-            # Extract data specifically for the lookback period to find the circuit day
-            search_df = df.tail(lookback)
-            circuit_days = search_df[search_df['Daily_Return'] >= min_move]
-            
-            if not circuit_days.empty:
-                last_circuit_row = circuit_days.iloc[-1]
-                circuit_date = circuit_days.index[-1]
-                
-                # Check if volume data is valid
-                if pd.isna(last_circuit_row['Avg_Vol_20']) or last_circuit_row['Avg_Vol_20'] == 0:
-                    continue
-                    
-                # Volume Condition
-                if last_circuit_row['Volume'] >= (last_circuit_row['Avg_Vol_20'] * vol_mult):
-                    
-                    # Consolidation Check: Focus strictly on the very recent days closing prices
-                    recent_df = df.tail(cons_days)
-                    if len(recent_df) >= cons_days:
-                        max_close = recent_df['Close'].max()
-                        min_close = recent_df['Close'].min()
-                        
-                        # Calculating close-to-close tight range matrix
-                        consolidation_range = ((max_close - min_close) / min_close) * 100
-                        
-                        if consolidation_range <= max_cons: 
-                            # Fetch News Safety Block
-                            news_headline = "N.A."
-                            try:
-                                news_list = stock.news
-                                if news_list and len(news_list) > 0:
-                                    news_headline = news_list[0]['title']
-                            except Exception:
-                                news_headline = "N.A."
-                                
-                            breakout_volume_mn = last_circuit_row['Volume'] / 1_000_000
-                                
-                            scanned_data.append({
-                                "Stock Ticker": ticker,
-                                "Current Price": round(df['Close'].iloc[-1], 2),
-                                f"{min_move}%+ Breakout Date": circuit_date.strftime('%Y-%m-%d'),
-                                "Move % on Breakout Day": round(last_circuit_row['Daily_Return'], 2),
-                                "Breakout Day Volume (Mn)": f"{round(breakout_volume_mn, 2)} M",
-                                "Recent Consolidation Range": f"{round(consolidation_range, 2)}%",
-                                "Catalyst News / Latest Trigger": news_headline
-                            })
-                            
-        except Exception as e:
-            st.sidebar.write(f"Log Error ({ticker}): {str(e)}")
-            continue
-            
-    return pd.DataFrame(scanned_data)
-
-# --- RUN SCANNER ---
-if st.button("🚀 Run Market Scan"):
-    with st.spinner("Processing historical delivery data and matching consolidation setups..."):
-        results_df = scan_stocks(tickers, min_move, volume_multiplier, consolidation_days, lookback_days, max_consolidation_allowed)
-        
-        if not results_df.empty:
-            st.success(f"Found {len(results_df)} stocks matching your exact framework!")
-            st.dataframe(
-                results_df, 
-                use_container_width=True,
-                column_config={
-                    "Catalyst News / Latest Trigger": st.column_config.TextColumn(width="large")
-                }
-            )
-            
-            csv = results_df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Export List to CSV", csv, "active_consolidation_scan.csv", "text/csv")
-        else:
-            st.error("No stocks found! Best Setting for Results: Keep Consolidation Period at 5 days & Max Allowed Consolidation Band at 12%.")
+        if idx % 50 == 0:
+            status_text.text(f"Scanning {
